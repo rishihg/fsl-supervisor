@@ -1,0 +1,12 @@
+# Pi-Plates library (provides BRIDGEplate + DAQC2plate access from non-Pi host)
+Pi-Plates
+
+# ActiveFiberCoupling dependencies (install after cloning the repo):
+#   git clone https://github.com/bnl-lab4/ActiveFiberCoupling.git
+#   pip install -e ./ActiveFiberCoupling
+#
+# AFC's own dependencies (from its imports):
+ticlib          # Tic stepper motor USB control
+pyserial        # MDT693B piezo controller
+sigfig          # significant-figure formatting (used in SensorClasses)
+# lmfit         # optional: needed for grid_search Gaussian fitting
