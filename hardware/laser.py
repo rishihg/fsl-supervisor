@@ -1,10 +1,13 @@
 """
-hardware/laser.py — laser enable and intensity control via DAQC2.
+hardware/laser.py — laser intensity control via DAQC2 DAC.
 
-Enable/disable: one DOUT bit (drives a relay or MOSFET gate).
-Intensity:      one DAC channel (0–4.095 V analog modulation input).
-                Leave intensity_channel=None if the laser has no analog
-                modulation input.
+The laser accepts a single 0–5 V analog input:
+  0 V   = off / minimum power
+  ~4 V  = maximum practical intensity (DAQC2 DAC ceiling)
+
+Set intensity in volts with set_voltage(); call off() to disable.
+The dead-zone near 0 V is laser-model-dependent — characterise before
+running automated sequences.
 """
 
 import logging
@@ -16,53 +19,30 @@ DAC_MAX_V = 4.095   # DAQC2 DAC ceiling
 
 
 class Laser:
-    """Controls laser enable (digital) and intensity (DAC).
+    """Controls laser intensity via a single DAC channel.
 
     Args:
-        board:             DAQC2Board instance.
-        enable_bit:        DOUT bit that enables the laser (0–7).
-        intensity_channel: DAC channel for analog intensity (1–4), or None.
-        active_low:        If True, pulling the enable bit low turns the
-                           laser on.  If False, pulling it low turns it off.
+        board:       DAQC2Board instance.
+        dac_channel: DAC channel wired to the laser's modulation input.
     """
 
-    def __init__(self, board: DAQC2Board, enable_bit: int,
-                 intensity_channel: int = None, active_low: bool = True):
+    def __init__(self, board: DAQC2Board, dac_channel: int = 0):
         self.board = board
-        self.enable_bit = enable_bit
-        self.intensity_channel = intensity_channel
-        self.active_low = active_low
-        self._enabled = False
-        self._intensity_v = 0.0
-        # ensure laser starts off
-        self.disable()
+        self.dac_channel = dac_channel
+        self._voltage = 0.0
+        self.off()
 
-    def enable(self):
-        self.board.set_dout(self.enable_bit, state=self.active_low)
-        self._enabled = True
-        log.info('Laser enabled')
-
-    def disable(self):
-        self.board.set_dout(self.enable_bit, state=not self.active_low)
-        self._enabled = False
-        log.info('Laser disabled')
-
-    def set_intensity(self, voltage: float):
-        """Set laser intensity via DAC (0–4.095 V).
-
-        The meaning of the voltage depends on the laser's modulation input
-        spec; document the calibration in the system notes.
-        """
-        if self.intensity_channel is None:
-            raise RuntimeError('No intensity DAC channel configured for this laser')
+    def set_voltage(self, voltage: float):
+        """Set laser intensity (0–4.095 V). 0 V disables the laser."""
         voltage = max(0.0, min(DAC_MAX_V, voltage))
-        self.board.set_dac(self.intensity_channel, voltage)
-        self._intensity_v = voltage
-        log.info('Laser intensity set to %.3f V', voltage)
+        self.board.set_dac(self.dac_channel, voltage)
+        self._voltage = voltage
+        log.info('Laser set to %.3f V', voltage)
 
-    def get_intensity(self) -> float:
-        return self._intensity_v
+    def off(self):
+        """Set DAC to 0 V (laser off)."""
+        self.set_voltage(0.0)
 
     @property
-    def is_enabled(self) -> bool:
-        return self._enabled
+    def voltage(self) -> float:
+        return self._voltage

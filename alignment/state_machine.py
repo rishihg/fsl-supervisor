@@ -110,12 +110,11 @@ class AlignmentStateMachine:
         with 'fiber_couple'; automatic transition on CoM threshold is a
         TODO once we have open-loop mirror control.
         """
-        self.shutter.open()
-        self.laser.enable()
+        self.shutter.trigger()
         # zero setpoint so anyloop (when started) aims for beam centre
         self.commander.send(0.0, 0.0)
-        log.info('Coarse align: shutter open, laser on, setpoint zeroed.')
-        log.info('Steer beam manually or use "setpoint y x" commands.')
+        log.info('Coarse align: shutter open, setpoint zeroed.')
+        log.info('Set laser intensity with "laser <V>" then steer with "setpoint y x".')
 
     def _run_fiber_couple(self):
         """Run the ActiveFiberCoupling hill-climber."""
@@ -158,11 +157,11 @@ class AlignmentStateMachine:
         except Exception:
             pass
         try:
-            self.shutter.close()
+            self.shutter.trigger()
         except Exception:
             pass
         try:
-            self.laser.disable()
+            self.laser.off()
         except Exception:
             pass
 
