@@ -390,7 +390,7 @@ class FSLSupervisorApp(App):
             if viewer.is_open:
                 url = f'http://localhost:{viewer.http_port}/'
                 exp_str = f'[dim]{viewer.exposure_us} µs[/dim]'
-                cam_str = f'[green]OPEN[/green] {exp_str}  [link="{url}"]{url}[/link]'
+                cam_str = f'[green]OPEN[/green]  [dim]\\[e][/dim]xposure = {exp_str}  [link="{url}"]{url}[/link]'
             else:
                 cam_str = '[dim]NOT OPEN[/dim]'
             lines.append(
