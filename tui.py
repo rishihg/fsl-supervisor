@@ -11,12 +11,12 @@ from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Label, RichLog, Static
 
 from anyloop_manager import AnyloopProcess, TelemetryReceiver, CommandSender
-from hardware import DAQC2Board, RetroShutter, Shutter, MCLS1, TicAxis, KDC101Axis
+from hardware import DAQC2Board, RetroShutter, Shutter, MCLS1, MCLS1Channel, TicAxis, KDC101Axis
 from alignment import AlignmentStateMachine, State
 from supervisor import (
     ANYLOOP_BINARY, ANYLOOP_CONFIG,
@@ -24,6 +24,7 @@ from supervisor import (
     DAQC2_ADDR, SHUTTER_BIT,
     SHUTTER_PORT, SHUTTER_OPEN_PW_US, SHUTTER_CLOSE_PW_US,
     MCLS1_PORT, MCLS1_CHANNEL, MCLS1_CURRENT_CAL, MCLS1_MAX_POWER_MW,
+    MCLS1_CHANNEL_3, MCLS1_CURRENT_CAL_3, MCLS1_MAX_POWER_MW_3,
     TIC_SERIAL, TIC_STEP_SIZE, KDC101_PORT, KDC101_CHANNEL, KDC101_STEP_SIZE,
     CameraViewer, CAMERA_CONFIGS,
 )
@@ -70,33 +71,47 @@ _STATE_STYLE: dict[State, tuple[str, str]] = {
 }
 
 
-# ── laser voltage modal ───────────────────────────────────────────────────────
+# ── laser modal ───────────────────────────────────────────────────────────────
 
 class LaserModal(ModalScreen):
-    """Floating dialog for setting laser voltage."""
+    """Floating dialog for setting power on any laser channel."""
 
     DEFAULT_CSS = """
     LaserModal {
         align: center middle;
     }
     LaserModal > Vertical {
-        width: 50;
-        height: 9;
+        width: 54;
+        height: auto;
         border: round $primary;
         background: $surface;
         padding: 1 2;
     }
     LaserModal Label {
+        margin-bottom: 0;
+    }
+    LaserModal #laser-header {
         margin-bottom: 1;
+    }
+    LaserModal Input {
+        margin-top: 1;
     }
     """
 
     BINDINGS = [Binding('escape', 'cancel', 'Cancel')]
 
+    def __init__(self, lasers: list[tuple[int, str, float, bool]]) -> None:
+        super().__init__()
+        self._lasers = lasers  # [(channel, name, power_mw, is_enabled), ...]
+
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(f'Set laser power (mW, {MCLS1_CURRENT_CAL[2]:.2f}–{MCLS1_CURRENT_CAL[3]:.1f}), or "off":')
-            yield Input(placeholder=f'e.g.  {MCLS1_CURRENT_CAL[3]/2:.2f}', id='laser-input')
+            yield Label('[dim]channel  power_mw   (or "off")[/dim]',
+                        id='laser-header')
+            for ch, name, mw, enabled in self._lasers:
+                state = f'{mw:.2f} mW  [green]on[/green]' if enabled else f'{mw:.2f} mW  [dim]off[/dim]'
+                yield Label(f'  [dim]{ch}[/dim]  {name:<10}  {state}')
+            yield Input(placeholder='channel  power_mw', id='laser-input')
 
     def on_mount(self) -> None:
         self.query_one('#laser-input', Input).focus()
@@ -177,11 +192,29 @@ class FSLSupervisorApp(App):
         background: $primary-darken-3;
     }
 
-    #hardware {
-        height: 12;
+    #hardware-panel {
+        height: auto;
+        margin: 1 1 0 1;
+    }
+
+    #hardware-left {
+        width: 1fr;
+        height: auto;
+    }
+
+    #hw-lasers, #hw-shutters, #hw-cameras {
         border: round $primary;
         padding: 0 2;
-        margin: 1 1 0 1;
+        height: auto;
+        margin: 0 1 1 0;
+    }
+
+    #hardware-right {
+        width: 34;
+        height: auto;
+        border: round $primary;
+        padding: 0 2;
+        margin: 0 0 1 0;
     }
 
     #log {
@@ -195,7 +228,7 @@ class FSLSupervisorApp(App):
         Binding('S', 'stop_loop',         'Stop loop'),
         Binding('o', 'open_shutter',      'Open shutter',  show=False),
         Binding('c', 'close_shutter',     'Close shutter', show=False),
-        Binding('r', 'trigger_retro',     'Retro',         show=False),
+        Binding('r', 'trigger_retroreflector', 'Retroreflector', show=False),
         Binding('l', 'set_laser',         'Laser…',        show=False),
         Binding('1', 'camera_toggle(0)',  'Cam 290',       show=False),
         Binding('2', 'camera_toggle(1)',  'Cam 662a',      show=False),
@@ -222,21 +255,29 @@ class FSLSupervisorApp(App):
         self.telemetry: TelemetryReceiver | None     = None
         self.commander: CommandSender | None         = None
         self.board:      DAQC2Board | None            = None
-        self.retro:      RetroShutter | None         = None
+        self.retroreflector:      RetroShutter | None         = None
         self.shutter:    Shutter | None              = None
         self.laser:      MCLS1 | None                = None
+        self.laser2:     MCLS1Channel | None         = None
         self.mirror_az:  TicAxis | None              = None
         self.mirror_alt: KDC101Axis | None           = None
         self.sm:         AlignmentStateMachine | None = None
         self._cameras: dict[int, CameraViewer] = {}
-        self._laser_pending: bool = False
+        self._laser_pending:    bool = False
+        self._laser2_pending:   bool = False
+        self._mirror_highlight: str | None = None
 
     # ── layout ───────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static('', id='status')
-        yield Static('', id='hardware', markup=True)
+        with Horizontal(id='hardware-panel'):
+            with Vertical(id='hardware-left'):
+                yield Static('', id='hw-lasers',   markup=True)
+                yield Static('', id='hw-shutters', markup=True)
+                yield Static('', id='hw-cameras',  markup=True)
+            yield Static('', id='hardware-right', markup=True)
         yield RichLog(id='log', highlight=True, markup=True)
         yield Footer()
 
@@ -256,12 +297,14 @@ class FSLSupervisorApp(App):
             self.telemetry = TelemetryReceiver(TELEMETRY_PORT)
             self.commander = CommandSender(COMMAND_PORT, N_COMMAND)
             self.board     = DAQC2Board(addr=DAQC2_ADDR)
-            self.retro     = RetroShutter(self.board, bit=SHUTTER_BIT)
+            self.retroreflector     = RetroShutter(self.board, bit=SHUTTER_BIT)
             self.shutter   = Shutter(SHUTTER_PORT,
                                      open_pw_us=SHUTTER_OPEN_PW_US,
                                      close_pw_us=SHUTTER_CLOSE_PW_US)
             self.laser     = MCLS1(MCLS1_PORT, channel=MCLS1_CHANNEL,
                                    current_cal=MCLS1_CURRENT_CAL)
+            self.laser2    = MCLS1Channel(self.laser, channel=MCLS1_CHANNEL_3,
+                                          current_cal=MCLS1_CURRENT_CAL_3)
         except Exception:
             log.exception('Hardware initialisation failed')
 
@@ -281,7 +324,7 @@ class FSLSupervisorApp(App):
             self.sm = AlignmentStateMachine(
                 anyloop   = self.anyloop,
                 commander = self.commander,
-                shutter   = self.retro,
+                shutter   = self.retroreflector,
                 laser     = self.laser,
                 telemetry = self.telemetry,
                 config    = self._config,
@@ -313,6 +356,8 @@ class FSLSupervisorApp(App):
             self.commander.close()
         if self.shutter:
             self.shutter.shutdown()
+        if self.laser2:
+            self.laser2.shutdown()
         if self.laser:
             self.laser.shutdown()
         if self.mirror_az:
@@ -350,54 +395,103 @@ class FSLSupervisorApp(App):
         )
 
     def _update_hardware(self) -> None:
-        lines = []
 
-        # Laser — power bar
-        mw = self.laser.power_mw if self.laser else 0.0
-        enabled = self.laser.is_enabled if self.laser else False
-        bar_len = 20
-        filled = int(round(mw / MCLS1_MAX_POWER_MW * bar_len))
-        filled = max(0, min(bar_len, filled))
-        bar = '█' * filled + '░' * (bar_len - filled)
-        if self._laser_pending:
-            lines.append(f'[dim]\\[l][/dim] Laser   [yellow]{bar}  …[/yellow]')
-        elif enabled:
-            lines.append(f'[dim]\\[l][/dim] Laser   [green]{bar}[/green]  {mw:.1f} mW')
-        else:
-            lines.append(f'[dim]\\[l][/dim] Laser   [dim]{bar}  OFF[/dim]')
+        # ── lasers box ────────────────────────────────────────────────────────
+        def _laser_line(laser, pending, max_mw, label):
+            mw      = laser.power_mw  if laser else 0.0
+            enabled = laser.is_enabled if laser else False
+            bar_len = 20
+            filled  = max(0, min(bar_len, int(round(mw / max_mw * bar_len))))
+            bar     = '█' * filled + '░' * (bar_len - filled)
+            if pending:
+                return f'{label}  [yellow]{bar}  …[/yellow]'
+            elif enabled:
+                return f'{label}  [green]{bar}[/green]  {mw:.1f} mW'
+            else:
+                return f'{label}  [dim]{bar}  OFF[/dim]'
 
-        # Servo shutter
+        lasers = [
+            '[dim]\\[l][/dim] Lasers:',
+            '  ' + _laser_line(self.laser,  self._laser_pending,
+                               MCLS1_MAX_POWER_MW,   'Quad ch. 2 (635nm)'),
+            '  ' + _laser_line(self.laser2, self._laser2_pending,
+                               MCLS1_MAX_POWER_MW_3, 'Quad ch. 3 (785nm)'),
+        ]
+        self.query_one('#hw-lasers', Static).update('\n'.join(lasers))
+
+        # ── shutters box ──────────────────────────────────────────────────────
         if self.shutter:
             sh = '[green]OPEN[/green]' if self.shutter.is_open else '[dim]CLOSED[/dim]'
         else:
             sh = '[dim]—[/dim]'
-        lines.append(f'[dim]\\[o/c][/dim] Shutter  {sh}')
+        shutters = [
+            f'[dim]\\[o/c][/dim] Shutter         {sh}',
+            '[dim]\\[r][/dim] Retroreflector  [dim]—[/dim]',
+        ]
+        self.query_one('#hw-shutters', Static).update('\n'.join(shutters))
 
-        # Retro (pulse-toggled, no readable state)
-        lines.append('[dim]\\[r][/dim] Retro    [dim]—[/dim]')
-
-        # Steering mirror axes
-        az_step  = self.mirror_az.step_size  if self.mirror_az  else None
-        alt_step = self.mirror_alt.step_size if self.mirror_alt else None
-        az_str  = f'[dim]step {az_step}[/dim]'  if az_step  is not None else '[dim]—[/dim]'
-        alt_str = f'[dim]step {alt_step}[/dim]' if alt_step is not None else '[dim]—[/dim]'
-        lines.append(f'[dim]\\[←→][/dim] Mirror Az   {az_str}')
-        lines.append(f'[dim]\\[↑↓][/dim] Mirror Alt  {alt_str}')
-
-        # Camera viewers — numbered 1/2/3 to match keybindings
+        # ── cameras box ───────────────────────────────────────────────────────
+        cameras = []
         for idx, viewer in self._cameras.items():
             cam_num = idx + 1
+            if cameras:
+                cameras.append('')  # blank line between camera entries
+            open_str = '[green]OPEN[/green]' if viewer.is_open else '[dim]NOT OPEN[/dim]'
+            cameras.append(f'[dim]\\[{cam_num}][/dim] Cam {cam_num}  {viewer.name}  {open_str}')
+            url = f'http://localhost:{viewer.http_port}/'
             if viewer.is_open:
-                url = f'http://localhost:{viewer.http_port}/'
-                exp_str = f'[dim]{viewer.exposure_us} µs[/dim]'
-                cam_str = f'[green]OPEN[/green]  [dim]\\[e][/dim]xposure = {exp_str}  [link="{url}"]{url}[/link]'
+                cameras.append(f'     [link="{url}"]{url}[/link]')
+                cameras.append(f'     [dim]\\[e][/dim]xposure = {viewer.exposure_us} µs')
             else:
-                cam_str = '[dim]NOT OPEN[/dim]'
-            lines.append(
-                f'[dim]\\[{cam_num}][/dim] Cam {cam_num}  {viewer.name}  {cam_str}'
-            )
+                cameras.append(f'     [dim]{url}[/dim]')
+                cameras.append(f'     [dim]\\[e][/dim][dim]xposure = {viewer.exposure_us} µs[/dim]')
+        self.query_one('#hw-cameras', Static).update('\n'.join(cameras))
 
-        self.query_one('#hardware', Static).update('\n'.join(lines))
+        # ── right panel — mirror control cross ────────────────────────────────
+        az_step  = self.mirror_az.step_size  if self.mirror_az  else None
+        alt_step = self.mirror_alt.step_size if self.mirror_alt else None
+        az_str  = str(az_step)  if az_step  is not None else '—'
+        alt_str = str(alt_step) if alt_step is not None else '—'
+
+        h = self._mirror_highlight
+
+        def _k(key, active: bool) -> str:
+            """Key hint bracket — bold green when active, dim otherwise."""
+            if active:
+                return f'[bold green]\\[{key}][/bold green]'
+            return f'[dim]\\[{key}][/dim]'
+
+        def _t(text: str, active: bool) -> str:
+            """Plain text — bold green when active, unchanged otherwise."""
+            return f'[bold green]{text}[/bold green]' if active else text
+
+        up      = h == 'up'
+        down    = h == 'down'
+        left    = h == 'left'
+        right_  = h == 'right'
+        coarser = h == 'coarser'
+        finer   = h == 'finer'
+        step_hl = coarser or finer
+
+        step_style = 'bold green' if step_hl else 'dim'
+
+        right = '\n'.join([
+            ' Steering',
+            '',
+            _t('            ↑', up),
+            f'         {_k("↑", up)} {_t("alt+", up)}',
+            _t('            │', up),
+            f' {_t("az−", left)} {_k("←", left)} {_t("───", left)}┼{_t("───", right_)} {_k("→", right_)} {_t("az+", right_)}',
+            _t('            │', down),
+            f'         {_k("↓", down)} {_t("alt−", down)}',
+            _t('            ↓', down),
+            '',
+            f' az  step: [{step_style}]{az_str}[/{step_style}]',
+            f' alt step: [{step_style}]{alt_str}[/{step_style}]',
+            '',
+            f' {_k("[", coarser)} {_t("÷2", coarser)}   step   {_t("×2", finer)} {_k("]", finer)}',
+        ])
+        self.query_one('#hardware-right', Static).update(right)
 
     # ── log ───────────────────────────────────────────────────────────────────
 
@@ -446,17 +540,27 @@ class FSLSupervisorApp(App):
         log.info('Shutter → closed')
         self._refresh_display()
 
-    def action_trigger_retro(self) -> None:
-        if not self.retro:
-            log.error('retro not initialised')
+    def action_trigger_retroreflector(self) -> None:
+        if not self.retroreflector:
+            log.error('retroreflector not initialised')
             return
-        self.retro.trigger()
-        log.info('Retro triggered')
+        self.retroreflector.trigger()
+        log.info('Retroreflector triggered')
+
+    def _flash_mirror(self, key: str, duration: float = 0.15) -> None:
+        self._mirror_highlight = key
+        self._refresh_display()
+        self.set_timer(duration, self._clear_mirror_highlight)
+
+    def _clear_mirror_highlight(self) -> None:
+        self._mirror_highlight = None
+        self._refresh_display()
 
     def action_mirror_az(self, direction: int) -> None:
         if not self.mirror_az:
             log.error('Mirror Az (Tic) not initialised')
             return
+        self._flash_mirror('left' if direction < 0 else 'right')
         threading.Thread(
             target=self.mirror_az.step, args=(direction,), daemon=True
         ).start()
@@ -465,6 +569,7 @@ class FSLSupervisorApp(App):
         if not self.mirror_alt:
             log.error('Mirror Alt (KDC101) not initialised')
             return
+        self._flash_mirror('up' if direction > 0 else 'down')
         threading.Thread(
             target=self.mirror_alt.step, args=(direction,), daemon=True
         ).start()
@@ -474,40 +579,64 @@ class FSLSupervisorApp(App):
             self.mirror_az.step_size = self.mirror_az.step_size * 2
         if self.mirror_alt:
             self.mirror_alt.step_size = self.mirror_alt.step_size * 2
-        self._refresh_display()
+        self._flash_mirror('finer', duration=0.3)
 
     def action_mirror_step_coarser(self) -> None:
         if self.mirror_az:
             self.mirror_az.step_size = max(1, self.mirror_az.step_size // 2)
         if self.mirror_alt:
             self.mirror_alt.step_size = max(1, self.mirror_alt.step_size // 2)
-        self._refresh_display()
+        self._flash_mirror('coarser', duration=0.3)
 
     def action_set_laser(self) -> None:
-        if not self.laser:
-            log.error('laser not initialised')
+        channel_map = {}
+        lasers_info = []
+        if self.laser:
+            channel_map[MCLS1_CHANNEL]   = (self.laser,  '_laser_pending')
+            lasers_info.append((MCLS1_CHANNEL,   'Quad ch.2 635nm',
+                                self.laser.power_mw,  self.laser.is_enabled))
+        if self.laser2:
+            channel_map[MCLS1_CHANNEL_3] = (self.laser2, '_laser2_pending')
+            lasers_info.append((MCLS1_CHANNEL_3, 'Quad ch.3 785nm',
+                                self.laser2.power_mw, self.laser2.is_enabled))
+        if not channel_map:
+            log.error('no lasers initialised')
             return
 
         def apply(value: str | None) -> None:
             if not value:
                 return
-            self._laser_pending = True
+            parts = value.split()
+            if len(parts) != 2:
+                log.error('Laser: expected "channel power_mw", got %r', value)
+                return
+            try:
+                ch = int(parts[0])
+            except ValueError:
+                log.error('Laser: invalid channel %r', parts[0])
+                return
+            if ch not in channel_map:
+                log.error('Laser: unknown channel %d', ch)
+                return
+            laser, pending_attr = channel_map[ch]
+            setattr(self, pending_attr, True)
             self._refresh_display()
             def _run():
-                if value.lower() == 'off':
-                    self.laser.off()
-                    log.info('Laser off')
+                if parts[1].lower() == 'off':
+                    laser.off()
+                    log.info('Laser ch%d off', ch)
                 else:
                     try:
-                        self.laser.set_power(float(value))
-                        log.info('Laser → %.3f mW', self.laser.power_mw)
+                        laser.set_power(float(parts[1]))
+                        log.info('Laser ch%d → %.3f mW', ch, laser.power_mw)
                     except ValueError:
-                        log.error('Invalid power: %r', value)
-                self._laser_pending = False
+                        log.error('Invalid power: %r', parts[1])
+                setattr(self, pending_attr, False)
                 self.call_from_thread(self._refresh_display)
-            threading.Thread(target=_run, daemon=True, name='laser-set').start()
+            threading.Thread(target=_run, daemon=True,
+                             name=f'laser{ch}-set').start()
 
-        self.push_screen(LaserModal(), apply)
+        self.push_screen(LaserModal(lasers_info), apply)
 
     def action_camera_toggle(self, idx: int) -> None:
         viewer = self._cameras.get(idx)

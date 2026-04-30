@@ -15,7 +15,7 @@ Commands (type 'help' at the prompt):
     fiber_couple            Advance to fiber-coupling step.
     lock                    Advance to loop lock-acquire step.
     status                  Print current system status.
-    abort                   Emergency stop (triggers retro, kills anyloop).
+    abort                   Emergency stop (triggers retroreflector, kills anyloop).
     quit / EOF              Shut down cleanly.
 """
 
@@ -30,7 +30,7 @@ import threading
 import time
 
 from anyloop_manager import AnyloopProcess, TelemetryReceiver, CommandSender
-from hardware import DAQC2Board, RetroShutter, Shutter, MCLS1, TicAxis, KDC101Axis
+from hardware import DAQC2Board, RetroShutter, Shutter, MCLS1, MCLS1Channel, TicAxis, KDC101Axis
 from alignment import AlignmentStateMachine, State
 
 # ── defaults (edit here or override on the command line) ───────────────────
@@ -59,6 +59,11 @@ MCLS1_CHANNEL     = 2
 # power= and is current-controlled from the front panel).
 MCLS1_CURRENT_CAL  = (43.0, 66.0, 0.32, 3.1)  # (min_mA, max_mA, min_mW, max_mW)
 MCLS1_MAX_POWER_MW = 3.1
+
+# MCLS1 channel 3 — calibrate current_cal once characterised
+MCLS1_CHANNEL_3      = 3
+MCLS1_CURRENT_CAL_3  = None   # TODO: (min_mA, max_mA, min_mW, max_mW)
+MCLS1_MAX_POWER_MW_3 = 3.1    # TODO: update once characterised
 
 # Shutter: Arduino Leonardo on USB serial
 SHUTTER_PORT        = '/dev/supervisor/shutter'
@@ -226,12 +231,14 @@ class SupervisorShell(cmd.Cmd):
 
         # ── hardware ─────────────────────────────────────────────────────────
         self.board         = DAQC2Board(addr=DAQC2_ADDR)
-        self.retro         = RetroShutter(self.board, bit=SHUTTER_BIT)
+        self.retroreflector         = RetroShutter(self.board, bit=SHUTTER_BIT)
         self.shutter       = Shutter(SHUTTER_PORT,
                                      open_pw_us=SHUTTER_OPEN_PW_US,
                                      close_pw_us=SHUTTER_CLOSE_PW_US)
         self.laser         = MCLS1(MCLS1_PORT, channel=MCLS1_CHANNEL,
                                     current_cal=MCLS1_CURRENT_CAL)
+        self.laser2        = MCLS1Channel(self.laser, channel=MCLS1_CHANNEL_3,
+                                          current_cal=MCLS1_CURRENT_CAL_3)
 
         # ── camera viewers ───────────────────────────────────────────────────
         self._cameras = {
@@ -243,7 +250,7 @@ class SupervisorShell(cmd.Cmd):
         self.sm = AlignmentStateMachine(
             anyloop   = self.anyloop,
             commander = self.commander,
-            shutter   = self.retro,
+            shutter   = self.retroreflector,
             laser     = self.laser,
             telemetry = self.telemetry,
             config    = self.config,
@@ -290,13 +297,13 @@ class SupervisorShell(cmd.Cmd):
 
     # ── hardware ─────────────────────────────────────────────────────────────
 
-    def do_retro(self, arg):
-        """Trigger the retroreflector cover (Thorlabs, pulse-toggled).  Usage: retro trigger"""
+    def do_retroreflector(self, arg):
+        """Trigger the retroreflector cover (Thorlabs, pulse-toggled).  Usage: retroreflector trigger"""
         if arg.strip().lower() == 'trigger':
-            self.retro.trigger()
-            print('Retro triggered')
+            self.retroreflector.trigger()
+            print('Retroreflector triggered')
         else:
-            print('Usage: retro trigger')
+            print('Usage: retroreflector trigger')
 
     def do_shutter(self, arg):
         """Control the shutter (Arduino Leonardo).
@@ -376,7 +383,7 @@ class SupervisorShell(cmd.Cmd):
             print(self.do_camera.__doc__)
 
     def do_laser(self, arg):
-        """Set laser power.
+        """Set laser ch2 power.
         Usage:
           laser <mW>   set output power in milliwatts
           laser off    disable laser output"""
@@ -386,7 +393,7 @@ class SupervisorShell(cmd.Cmd):
             return
         if parts[0] == 'off':
             self.laser.off()
-            print('Laser off')
+            print('Laser ch2 off')
         elif len(parts) == 1:
             try:
                 mw = float(parts[0])
@@ -394,9 +401,32 @@ class SupervisorShell(cmd.Cmd):
                 print('Usage: laser <mW> | laser off')
                 return
             self.laser.set_power(mw)
-            print(f'Laser → {self.laser.power_mw:.3f} mW (enabled)')
+            print(f'Laser ch2 → {self.laser.power_mw:.3f} mW (enabled)')
         else:
             print(self.do_laser.__doc__)
+
+    def do_laser3(self, arg):
+        """Set laser ch3 power.
+        Usage:
+          laser3 <mW>   set output power in milliwatts
+          laser3 off    disable laser output"""
+        parts = arg.split()
+        if not parts:
+            print(self.do_laser3.__doc__)
+            return
+        if parts[0] == 'off':
+            self.laser2.off()
+            print('Laser ch3 off')
+        elif len(parts) == 1:
+            try:
+                mw = float(parts[0])
+            except ValueError:
+                print('Usage: laser3 <mW> | laser3 off')
+                return
+            self.laser2.set_power(mw)
+            print(f'Laser ch3 → {self.laser2.power_mw:.3f} mW (enabled)')
+        else:
+            print(self.do_laser3.__doc__)
 
     # ── alignment sequence ───────────────────────────────────────────────────
 
@@ -446,7 +476,7 @@ class SupervisorShell(cmd.Cmd):
             f'  state    : {self.sm.state.value}\n'
             f'  anyloop  : {loop_str}\n'
             f'  CoM      : {com_str}\n'
-            f'  retro    : state unknown (pulse-triggered)\n'
+            f'  retroreflector: state unknown (pulse-triggered)\n'
             f'  laser    : {self.laser.power_mw:.3f} mW'
             + (' (enabled)' if self.laser.is_enabled else ' (disabled)')
         )
@@ -469,6 +499,7 @@ class SupervisorShell(cmd.Cmd):
         self.telemetry.stop()
         self.commander.close()
         self.shutter.shutdown()
+        self.laser2.shutdown()
         self.laser.shutdown()
         return True
 
