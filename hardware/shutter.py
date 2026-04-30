@@ -65,9 +65,12 @@ class Shutter:
         self.close_pw_us = close_pw_us
         self._open = False
         self._ser = serial.Serial(port, baud, timeout=timeout)
-        # wait for Arduino to reset and send READY
+        # wait for Arduino to reset and send READY; an empty response just means
+        # the sketch was already running and didn't reset on reconnect
         ready = self._ser.readline().decode().strip()
-        if ready != 'READY':
+        if ready == 'READY' or ready == '':
+            pass
+        else:
             log.warning('Shutter: expected READY, got %r', ready)
         log.info('Shutter on %s initialised', port)
 

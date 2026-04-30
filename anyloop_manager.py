@@ -170,16 +170,16 @@ class AnyloopProcess:
         self._proc: Optional[subprocess.Popen] = None
         self._logfile = None
 
-    def start(self, config: str, log_file: Optional[str] = None):
+    def start(self, config: str, log_file: Optional[str] = '/home/fsl/anyloop.log'):
         if self.running:
             raise RuntimeError('anyloop is already running')
         if log_file:
-            self._logfile = open(log_file, 'w')
+            self._logfile = open(log_file, 'a')
             stdout = self._logfile
             stderr = self._logfile
         else:
             stdout = subprocess.DEVNULL
-            stderr = None   # inherit: errors visible in terminal
+            stderr = subprocess.DEVNULL
         self._proc = subprocess.Popen(
             [self.binary, config],
             stdout=stdout,

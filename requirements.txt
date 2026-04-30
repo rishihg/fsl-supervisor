@@ -1,6 +1,10 @@
 # Pi-Plates library (provides BRIDGEplate + DAQC2plate access from non-Pi host)
 Pi-Plates
 
+textual          # TUI framework
+numpy            # array handling for camera viewer
+opencv-python-headless    # camera frame encoding (MJPEG stream)
+
 # ActiveFiberCoupling dependencies (install after cloning the repo):
 #   git clone https://github.com/bnl-lab4/ActiveFiberCoupling.git
 #   pip install -e ./ActiveFiberCoupling
