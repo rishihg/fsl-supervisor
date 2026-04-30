@@ -21,6 +21,7 @@ Commands (type 'help' at the prompt):
 
 import argparse
 import cmd
+import json
 import logging
 import select
 import subprocess
@@ -108,13 +109,41 @@ class CameraViewer:
 
     def __init__(self, cam_index: int, config: str, port: int, name: str,
                  http_port: int):
-        self.cam_index = cam_index
-        self.config    = config
-        self.port      = port
-        self.name      = name
-        self.http_port = http_port
-        self._anyloop  = AnyloopProcess(ANYLOOP_BINARY)
+        self.cam_index   = cam_index
+        self.config      = config
+        self.port        = port
+        self.name        = name
+        self.http_port   = http_port
+        self.exposure_us = self._read_exposure_us()
+        self._anyloop    = AnyloopProcess(ANYLOOP_BINARY)
         self._viewer: subprocess.Popen | None = None
+
+    def _read_exposure_us(self) -> int:
+        """Read exposure_us from the config JSON (returns 10000 on any failure)."""
+        try:
+            with open(self.config) as f:
+                cfg = json.load(f)
+            for device in cfg.get('pipeline', []):
+                if 'aylp_asi' in device.get('uri', ''):
+                    return int(device.get('params', {}).get('exposure_us', 10000))
+        except Exception:
+            pass
+        return 10000
+
+    def set_exposure(self, exposure_us: int):
+        """Patch exposure_us in the config JSON and restart the viewer if open."""
+        with open(self.config) as f:
+            cfg = json.load(f)
+        for device in cfg.get('pipeline', []):
+            if 'aylp_asi' in device.get('uri', ''):
+                device['params']['exposure_us'] = exposure_us
+        with open(self.config, 'w') as f:
+            json.dump(cfg, f, indent=4)
+        self.exposure_us = exposure_us
+        log.info('Camera %d (%s): exposure → %d µs', self.cam_index, self.name, exposure_us)
+        if self.is_open:
+            self.close()
+            self.open()
 
     def _evict_port(self, port: int):
         """Kill any process already listening on a TCP port (stale viewers)."""

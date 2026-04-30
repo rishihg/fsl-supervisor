@@ -108,6 +108,58 @@ class LaserModal(ModalScreen):
         self.dismiss(None)
 
 
+# ── exposure modal ────────────────────────────────────────────────────────────
+
+class ExposureModal(ModalScreen):
+    """Floating dialog for setting camera exposure."""
+
+    DEFAULT_CSS = """
+    ExposureModal {
+        align: center middle;
+    }
+    ExposureModal > Vertical {
+        width: 54;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    ExposureModal Label {
+        margin-bottom: 0;
+    }
+    ExposureModal #exp-header {
+        margin-bottom: 1;
+    }
+    ExposureModal Input {
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [Binding('escape', 'cancel', 'Cancel')]
+
+    def __init__(self, cameras: dict) -> None:
+        super().__init__()
+        self._cameras = cameras
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label('[dim]slot  exposure_µs   (e.g. 0 20000)[/dim]',
+                        id='exp-header')
+            for idx, viewer in sorted(self._cameras.items()):
+                exp_str = f'{viewer.exposure_us} µs' if viewer.is_open else '[dim]closed[/dim]'
+                yield Label(f'  [dim]{idx}[/dim]  {viewer.name:<12}  {exp_str}')
+            yield Input(placeholder='slot  exposure_µs', id='exp-input')
+
+    def on_mount(self) -> None:
+        self.query_one('#exp-input', Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # ── main application ──────────────────────────────────────────────────────────
 
 class FSLSupervisorApp(App):
@@ -148,6 +200,7 @@ class FSLSupervisorApp(App):
         Binding('1', 'camera_toggle(0)',  'Cam 290',       show=False),
         Binding('2', 'camera_toggle(1)',  'Cam 662a',      show=False),
         Binding('3', 'camera_toggle(2)',  'Cam 662b',      show=False),
+        Binding('e', 'set_exposure',      'Exposure…',     show=False),
         # Steering mirror — arrow keys; priority so RichLog doesn't consume them
         Binding('left',  'mirror_az(-1)', 'Az−',   show=False, priority=True),
         Binding('right', 'mirror_az(1)',  'Az+',   show=False, priority=True),
@@ -331,12 +384,13 @@ class FSLSupervisorApp(App):
         lines.append(f'[dim]\\[←→][/dim] Mirror Az   {az_str}')
         lines.append(f'[dim]\\[↑↓][/dim] Mirror Alt  {alt_str}')
 
-        # Camera viewers — numbered 1/2 to match keybindings
+        # Camera viewers — numbered 1/2/3 to match keybindings
         for idx, viewer in self._cameras.items():
             cam_num = idx + 1
             if viewer.is_open:
                 url = f'http://localhost:{viewer.http_port}/'
-                cam_str = f'[green]OPEN[/green] at [link="{url}"]{url}[/link]'
+                exp_str = f'[dim]{viewer.exposure_us} µs[/dim]'
+                cam_str = f'[green]OPEN[/green] {exp_str}  [link="{url}"]{url}[/link]'
             else:
                 cam_str = '[dim]NOT OPEN[/dim]'
             lines.append(
@@ -473,6 +527,34 @@ class FSLSupervisorApp(App):
             except Exception as exc:
                 log.error('Camera %d open failed: %s', idx, exc)
         self._refresh_display()
+
+    def action_set_exposure(self) -> None:
+        def apply(value: str | None) -> None:
+            if not value:
+                return
+            parts = value.split()
+            if len(parts) != 2:
+                log.error('Exposure: expected "slot exposure_µs", got %r', value)
+                return
+            try:
+                idx = int(parts[0])
+                us  = int(parts[1])
+            except ValueError:
+                log.error('Exposure: invalid input %r', value)
+                return
+            viewer = self._cameras.get(idx)
+            if not viewer:
+                log.error('Exposure: unknown camera slot %d', idx)
+                return
+            def _run():
+                try:
+                    viewer.set_exposure(us)
+                except Exception as exc:
+                    log.error('Exposure set failed: %s', exc)
+                self.call_from_thread(self._refresh_display)
+            threading.Thread(target=_run, daemon=True, name='exposure-set').start()
+
+        self.push_screen(ExposureModal(self._cameras), apply)
 
     def action_abort(self) -> None:
         if not self.sm:
