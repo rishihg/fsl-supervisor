@@ -26,10 +26,14 @@ from supervisor import (
     MCLS1_PORT, MCLS1_CHANNEL, MCLS1_CURRENT_CAL, MCLS1_MAX_POWER_MW,
     MCLS1_CHANNEL_3, MCLS1_CURRENT_CAL_3, MCLS1_MAX_POWER_MW_3,
     TIC_SERIAL, TIC_STEP_SIZE, KDC101_PORT, KDC101_CHANNEL, KDC101_STEP_SIZE,
+    FIBER_TIC_SERIALS, FIBER_TIC_STEP_SIZE,
     CameraViewer, CAMERA_CONFIGS,
 )
 
 log = logging.getLogger(__name__)
+
+_FIBER_LABEL = {'x': 'x', 'y': 'y', 'z': 'z', 'theta': 'θ', 'phi': 'φ'}
+_FIBER_AXES  = list(FIBER_TIC_SERIALS.keys())
 
 # ── logging → TUI bridge ─────────────────────────────────────────────────────
 
@@ -100,17 +104,17 @@ class LaserModal(ModalScreen):
 
     BINDINGS = [Binding('escape', 'cancel', 'Cancel')]
 
-    def __init__(self, lasers: list[tuple[int, str, float, bool]]) -> None:
+    def __init__(self, lasers: list[tuple[int, str, float, bool, float, float]]) -> None:
         super().__init__()
-        self._lasers = lasers  # [(channel, name, power_mw, is_enabled), ...]
+        self._lasers = lasers  # [(channel, name, power_mw, is_enabled, min_mw, max_mw), ...]
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label('[dim]channel  power_mw   (or "off")[/dim]',
                         id='laser-header')
-            for ch, name, mw, enabled in self._lasers:
+            for ch, name, mw, enabled, min_mw, max_mw in self._lasers:
                 state = f'{mw:.2f} mW  [green]on[/green]' if enabled else f'{mw:.2f} mW  [dim]off[/dim]'
-                yield Label(f'  [dim]{ch}[/dim]  {name:<10}  {state}')
+                yield Label(f'  [dim]{ch}[/dim]  {name:<10}  {state}  [dim]({min_mw}–{max_mw} mW)[/dim]')
             yield Input(placeholder='channel  power_mw', id='laser-input')
 
     def on_mount(self) -> None:
@@ -158,12 +162,12 @@ class ExposureModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label('[dim]slot  exposure_µs   (e.g. 0 20000)[/dim]',
+            yield Label('[dim]cam  exposure_µs   (e.g. 1 20000)[/dim]',
                         id='exp-header')
             for idx, viewer in sorted(self._cameras.items()):
                 exp_str = f'{viewer.exposure_us} µs' if viewer.is_open else '[dim]closed[/dim]'
-                yield Label(f'  [dim]{idx}[/dim]  {viewer.name:<12}  {exp_str}')
-            yield Input(placeholder='slot  exposure_µs', id='exp-input')
+                yield Label(f'  [dim]{idx + 1}[/dim]  {viewer.name:<12}  {exp_str}')
+            yield Input(placeholder='cam  exposure_µs', id='exp-input')
 
     def on_mount(self) -> None:
         self.query_one('#exp-input', Input).focus()
@@ -241,6 +245,12 @@ class FSLSupervisorApp(App):
         Binding('down',  'mirror_alt(-1)','Alt−',  show=False, priority=True),
         Binding('[',     'mirror_step_coarser', 'Step÷2', show=False),
         Binding(']',     'mirror_step_finer',   'Step×2', show=False),
+        # Fiber stage
+        Binding('f',   'fiber_cycle',        'Fiber axis', show=False),
+        Binding('=',   'fiber_step(1)',      'Fiber+',     show=False),
+        Binding('-',   'fiber_step(-1)',     'Fiber−',     show=False),
+        Binding('comma',      'fiber_step_coarser', 'FiberStep÷2', show=False),
+        Binding('full_stop',  'fiber_step_finer',   'FiberStep×2', show=False),
         Binding('a', 'abort',             'Abort'),
         Binding('q', 'quit',              'Quit'),
     ]
@@ -266,6 +276,9 @@ class FSLSupervisorApp(App):
         self._laser_pending:    bool = False
         self._laser2_pending:   bool = False
         self._mirror_highlight: str | None = None
+        self.fiber_axes: dict[str, TicAxis | None] = {k: None for k in _FIBER_AXES}
+        self._fiber_active:    str       = _FIBER_AXES[0]
+        self._fiber_highlight: str | None = None
 
     # ── layout ───────────────────────────────────────────────────────────────
 
@@ -320,6 +333,15 @@ class FSLSupervisorApp(App):
         except Exception:
             log.exception('Mirror Alt (KDC101) init failed')
 
+        for axis, serial in FIBER_TIC_SERIALS.items():
+            if not serial:
+                continue
+            try:
+                self.fiber_axes[axis] = TicAxis(step_size=FIBER_TIC_STEP_SIZE,
+                                                serial_number=serial)
+            except Exception:
+                log.exception('Fiber stage %s (Tic serial=%s) init failed', axis, serial)
+
         try:
             self.sm = AlignmentStateMachine(
                 anyloop   = self.anyloop,
@@ -364,6 +386,9 @@ class FSLSupervisorApp(App):
             self.mirror_az.shutdown()
         if self.mirror_alt:
             self.mirror_alt.shutdown()
+        for ax in self.fiber_axes.values():
+            if ax:
+                ax.shutdown()
         for viewer in self._cameras.values():
             viewer.close()
 
@@ -413,9 +438,9 @@ class FSLSupervisorApp(App):
         lasers = [
             '[dim]\\[l][/dim] Lasers:',
             '  ' + _laser_line(self.laser,  self._laser_pending,
-                               MCLS1_MAX_POWER_MW,   'Quad ch. 2 (635nm)'),
+                               MCLS1_MAX_POWER_MW,   'MCLS ch. 2 (635nm)'),
             '  ' + _laser_line(self.laser2, self._laser2_pending,
-                               MCLS1_MAX_POWER_MW_3, 'Quad ch. 3 (785nm)'),
+                               MCLS1_MAX_POWER_MW_3, 'MCLS ch. 3 (785nm)'),
         ]
         self.query_one('#hw-lasers', Static).update('\n'.join(lasers))
 
@@ -475,8 +500,34 @@ class FSLSupervisorApp(App):
 
         step_style = 'bold green' if step_hl else 'dim'
 
+        # ── fiber stage section ───────────────────────────────────────────────
+        fiber_lines: list[str] = [
+            '',
+            '─' * 28,
+            ' Fiber Stage',
+            '',
+            f' {_k("f", False)} cycle   {_k("=", False)}+  {_k("-", False)}−',
+            f' {_k(",", False)}÷2  step  ×2{_k(".", False)}',
+            '',
+        ]
+        for ax in _FIBER_AXES:
+            tobj  = self.fiber_axes.get(ax)
+            label = _FIBER_LABEL[ax]
+            active = ax == self._fiber_active
+            flash  = self._fiber_highlight == ax
+            if active:
+                step_val = str(tobj.step_size) if tobj else '—'
+                line = (f' [bold green]▶ {label}[/bold green]'
+                        f'  [dim]step:[/dim] {step_val}')
+            else:
+                avail = '' if tobj else ' [dim](—)[/dim]'
+                line = f'   {label}{avail}'
+            if flash:
+                line = f'[bold green]{line}[/bold green]'
+            fiber_lines.append(line)
+
         right = '\n'.join([
-            ' Steering',
+            ' Optical Steering',
             '',
             _t('            ↑', up),
             f'         {_k("↑", up)} {_t("alt+", up)}',
@@ -490,7 +541,7 @@ class FSLSupervisorApp(App):
             f' alt step: [{step_style}]{alt_str}[/{step_style}]',
             '',
             f' {_k("[", coarser)} {_t("÷2", coarser)}   step   {_t("×2", finer)} {_k("]", finer)}',
-        ])
+        ] + fiber_lines)
         self.query_one('#hardware-right', Static).update(right)
 
     # ── log ───────────────────────────────────────────────────────────────────
@@ -588,17 +639,56 @@ class FSLSupervisorApp(App):
             self.mirror_alt.step_size = max(1, self.mirror_alt.step_size // 2)
         self._flash_mirror('coarser', duration=0.3)
 
+    # ── fiber stage actions ───────────────────────────────────────────────────
+
+    def _flash_fiber(self, axis: str, duration: float = 0.15) -> None:
+        self._fiber_highlight = axis
+        self._refresh_display()
+        self.set_timer(duration, self._clear_fiber_highlight)
+
+    def _clear_fiber_highlight(self) -> None:
+        self._fiber_highlight = None
+        self._refresh_display()
+
+    def action_fiber_cycle(self) -> None:
+        idx = _FIBER_AXES.index(self._fiber_active)
+        self._fiber_active = _FIBER_AXES[(idx + 1) % len(_FIBER_AXES)]
+        self._refresh_display()
+
+    def action_fiber_step(self, direction: int) -> None:
+        ax = self._fiber_active
+        tobj = self.fiber_axes.get(ax)
+        if not tobj:
+            log.error('Fiber axis %s not initialised', ax)
+            return
+        self._flash_fiber(ax)
+        threading.Thread(target=tobj.step, args=(direction,), daemon=True).start()
+
+    def action_fiber_step_finer(self) -> None:
+        tobj = self.fiber_axes.get(self._fiber_active)
+        if tobj:
+            tobj.step_size = tobj.step_size * 2
+        self._flash_fiber(self._fiber_active, duration=0.3)
+
+    def action_fiber_step_coarser(self) -> None:
+        tobj = self.fiber_axes.get(self._fiber_active)
+        if tobj:
+            tobj.step_size = max(1, tobj.step_size // 2)
+        self._flash_fiber(self._fiber_active, duration=0.3)
+
     def action_set_laser(self) -> None:
         channel_map = {}
         lasers_info = []
         if self.laser:
             channel_map[MCLS1_CHANNEL]   = (self.laser,  '_laser_pending')
-            lasers_info.append((MCLS1_CHANNEL,   'Quad ch.2 635nm',
-                                self.laser.power_mw,  self.laser.is_enabled))
+            lasers_info.append((MCLS1_CHANNEL,   'MCLS ch.2 635nm',
+                                self.laser.power_mw,  self.laser.is_enabled,
+                                MCLS1_CURRENT_CAL[2], MCLS1_CURRENT_CAL[3]))
         if self.laser2:
             channel_map[MCLS1_CHANNEL_3] = (self.laser2, '_laser2_pending')
-            lasers_info.append((MCLS1_CHANNEL_3, 'Quad ch.3 785nm',
-                                self.laser2.power_mw, self.laser2.is_enabled))
+            lasers_info.append((MCLS1_CHANNEL_3, 'MCLS ch.3 785nm',
+                                self.laser2.power_mw, self.laser2.is_enabled,
+                                MCLS1_CURRENT_CAL_3[2], MCLS1_CURRENT_CAL_3[3]))
         if not channel_map:
             log.error('no lasers initialised')
             return
@@ -666,14 +756,15 @@ class FSLSupervisorApp(App):
                 log.error('Exposure: expected "slot exposure_µs", got %r', value)
                 return
             try:
-                idx = int(parts[0])
-                us  = int(parts[1])
+                cam_num = int(parts[0])
+                us      = int(parts[1])
             except ValueError:
                 log.error('Exposure: invalid input %r', value)
                 return
+            idx = cam_num - 1
             viewer = self._cameras.get(idx)
             if not viewer:
-                log.error('Exposure: unknown camera slot %d', idx)
+                log.error('Exposure: unknown camera %d (expected 1–%d)', cam_num, len(self._cameras))
                 return
             def _run():
                 try:

@@ -62,8 +62,8 @@ MCLS1_MAX_POWER_MW = 3.1
 
 # MCLS1 channel 3 — calibrate current_cal once characterised
 MCLS1_CHANNEL_3      = 3
-MCLS1_CURRENT_CAL_3  = None   # TODO: (min_mA, max_mA, min_mW, max_mW)
-MCLS1_MAX_POWER_MW_3 = 3.1    # TODO: update once characterised
+MCLS1_CURRENT_CAL_3  = (22.8, 59.39, 0.18, 7.55) 
+MCLS1_MAX_POWER_MW_3 = 7.55    
 
 # Shutter: Arduino Leonardo on USB serial
 SHUTTER_PORT        = '/dev/supervisor/shutter'
@@ -76,6 +76,17 @@ TIC_STEP_SIZE     = 5         # microsteps per keypress — tune to taste
 KDC101_PORT       = '/dev/supervisor/kdc101'
 KDC101_CHANNEL    = 1
 KDC101_STEP_SIZE  = 500       # encoder counts per keypress — tune to taste
+
+# Fiber stage: 5x Tic T834 (x/y/z translation + θ/φ tip-tilt)
+# Fill in serial numbers once identified (run: ticcmd --list).
+FIBER_TIC_SERIALS: dict[str, str] = {
+    'x':     '',   # translation X
+    'y':     '',   # translation Y
+    'z':     '',   # translation Z
+    'theta': '',   # tip  θ
+    'phi':   '',   # tilt φ
+}
+FIBER_TIC_STEP_SIZE = 5   # microsteps per keypress — tune per axis
 
 # Camera viewers: open-loop anyloop configs + MJPEG viewer script
 # ASI SDK enumeration on this machine: index 0 = ASI290MM, index 1 = ASI662MM
