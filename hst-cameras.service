@@ -1,0 +1,18 @@
+[Unit]
+Description=HST multi-camera MJPEG service
+After=network.target
+
+[Service]
+Type=simple
+Environment=ZWO_ASI_LIB=/home/qshanty/git/aylp_asi/libasi/lib/x64/libASICamera2.so.1.41
+ExecStart=/usr/bin/python3 /home/qshanty/supervisor/camera_service.py
+Restart=always
+RestartSec=3
+# Safety net: if memory ever runs away, restart cleanly instead of swapping
+MemoryMax=2G
+MemoryHigh=1500M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

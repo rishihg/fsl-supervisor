@@ -13,4 +13,5 @@ opencv-python-headless    # camera frame encoding (MJPEG stream)
 ticlib          # Tic stepper motor USB control
 pyserial        # MDT693B piezo controller
 sigfig          # significant-figure formatting (used in SensorClasses)
+toptica-lasersdk  # Toptica DLC pro control (DeCoP over network)
 # lmfit         # optional: needed for grid_search Gaussian fitting
