@@ -1581,13 +1581,22 @@ def _acquire_single_instance_lock():
     use: tmux attach -t hst  — do NOT run this script again directly."""
     import fcntl
     lock_path = '/tmp/hst_supervisor.lock'
-    lock_file = open(lock_path, 'w')
+    # Open with 'a+' (not 'w') so a failed flock attempt below does NOT
+    # truncate the file — 'w' truncates on open regardless of whether the
+    # lock is subsequently acquired, which wipes out the PID left behind
+    # by the process that actually holds the lock, breaking the "who has
+    # it" diagnostic just when it's needed most (a second copy starting
+    # while the first is running).
+    lock_file = open(lock_path, 'a+')
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        lock_file.seek(0)
+        held_pid = lock_file.read().strip()
         print()
         print('=' * 70)
-        print('ERROR: hst_supervisor.py is already running (lock held).')
+        print('ERROR: hst_supervisor.py is already running'
+              + (f' (PID {held_pid})' if held_pid else '') + ' (lock held).')
         print()
         print('Running a second copy will cause the CLD1010, Arduino, and')
         print('Tic controllers to receive interleaved commands from both')
@@ -1598,6 +1607,8 @@ def _acquire_single_instance_lock():
         print('    tmux attach -t hst')
         print('=' * 70)
         sys.exit(1)
+    lock_file.seek(0)
+    lock_file.truncate()
     lock_file.write(str(os.getpid()))
     lock_file.flush()
     return lock_file  # keep a reference so the lock isn't released by GC
