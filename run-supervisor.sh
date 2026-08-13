@@ -6,6 +6,11 @@
 # Do NOT run `python3 hst_supervisor.py` directly — a copy started outside
 # tmux holds the single-instance lock but has no tmux session to attach to,
 # leaving anyone who ssh's in unable to reach it. Use this script instead.
+#
+# Run as `./run-supervisor.sh` (this directory isn't on PATH by default), or
+# symlink it onto PATH once per account, e.g.:
+#     ln -s /home/qshanty/supervisor/run-supervisor.sh ~/bin/run-supervisor.sh
+# so it works as a bare command from any directory over SSH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
